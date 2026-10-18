@@ -1,0 +1,66 @@
+name: Update Barron's RSS mirror
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # top of every hour
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch the feed
+        id: fetch
+        run: |
+          set -euo pipefail
+          URL="https://news.google.com/rss/search?q=site:barrons.com&hl=en-US&gl=US&ceid=US:en"
+          CODE=$(curl -sS -o new_feed.xml -w "%{http_code}" \
+            -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36" \
+            "$URL")
+          SIZE=$(wc -c < new_feed.xml)
+          echo "HTTP $CODE, $SIZE bytes"
+
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Fetch failed with HTTP $CODE — leaving barrons.xml untouched"
+            exit 1
+          fi
+
+          # A real feed is comfortably larger than this; a block/captcha page
+          # or an empty body is not. Fail loudly rather than publish garbage.
+          if [ "$SIZE" -lt 5000 ]; then
+            echo "::error::Response only $SIZE bytes — looks blocked or empty, leaving barrons.xml untouched"
+            exit 1
+          fi
+
+          if ! python3 -c "import xml.etree.ElementTree as ET; ET.parse('new_feed.xml')"; then
+            echo "::error::Response is not well-formed XML — leaving barrons.xml untouched"
+            exit 1
+          fi
+
+          ITEMS=$(python3 -c "import xml.etree.ElementTree as ET; print(len(ET.parse('new_feed.xml').getroot().findall('.//item')))")
+          echo "Parsed $ITEMS items"
+          if [ "$ITEMS" -lt 5 ]; then
+            echo "::error::Only $ITEMS item(s) — suspiciously few, leaving barrons.xml untouched"
+            exit 1
+          fi
+
+      - name: Publish if changed
+        run: |
+          set -euo pipefail
+          if [ -f barrons.xml ] && cmp -s barrons.xml new_feed.xml; then
+            echo "No change since last run."
+            rm new_feed.xml
+            exit 0
+          fi
+          mv new_feed.xml barrons.xml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add barrons.xml
+          git commit -m "Update feed ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push

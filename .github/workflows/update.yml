@@ -1,4 +1,4 @@
-name: Update Barron's RSS mirror
+name: Update Google News RSS mirrors
 
 on:
   schedule:
@@ -15,52 +15,76 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch the feed
-        id: fetch
+      - name: Fetch each mirrored feed
         run: |
           set -euo pipefail
-          URL="https://news.google.com/rss/search?q=site:barrons.com&hl=en-US&gl=US&ceid=US:en"
-          CODE=$(curl -sS -o new_feed.xml -w "%{http_code}" \
-            -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36" \
-            "$URL")
-          SIZE=$(wc -c < new_feed.xml)
-          echo "HTTP $CODE, $SIZE bytes"
 
-          if [ "$CODE" != "200" ]; then
-            echo "::error::Fetch failed with HTTP $CODE — leaving barrons.xml untouched"
-            exit 1
-          fi
+          # name:query — query is the Google News site: search, name.xml is
+          # the published filename. Add a line here to mirror another source;
+          # everything else (validation, publish-on-change) is shared.
+          SOURCES=(
+            "barrons:site:barrons.com"
+            "brookings:site:brookings.edu"
+          )
 
-          # A real feed is comfortably larger than this; a block/captcha page
-          # or an empty body is not. Fail loudly rather than publish garbage.
-          if [ "$SIZE" -lt 5000 ]; then
-            echo "::error::Response only $SIZE bytes — looks blocked or empty, leaving barrons.xml untouched"
-            exit 1
-          fi
+          CHANGED=0
+          for entry in "${SOURCES[@]}"; do
+            name="${entry%%:*}"
+            query="${entry#*:}"
+            out="${name}.xml"
+            tmp="${name}.new.xml"
 
-          if ! python3 -c "import xml.etree.ElementTree as ET; ET.parse('new_feed.xml')"; then
-            echo "::error::Response is not well-formed XML — leaving barrons.xml untouched"
-            exit 1
-          fi
+            URL="https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en"
+            CODE=$(curl -sS -o "$tmp" -w "%{http_code}" \
+              -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36" \
+              "$URL")
+            SIZE=$(wc -c < "$tmp")
+            echo "[$name] HTTP $CODE, $SIZE bytes"
 
-          ITEMS=$(python3 -c "import xml.etree.ElementTree as ET; print(len(ET.parse('new_feed.xml').getroot().findall('.//item')))")
-          echo "Parsed $ITEMS items"
-          if [ "$ITEMS" -lt 5 ]; then
-            echo "::error::Only $ITEMS item(s) — suspiciously few, leaving barrons.xml untouched"
-            exit 1
-          fi
+            if [ "$CODE" != "200" ]; then
+              echo "::error::[$name] fetch failed with HTTP $CODE — leaving $out untouched"
+              rm -f "$tmp"
+              continue
+            fi
 
-      - name: Publish if changed
-        run: |
-          set -euo pipefail
-          if [ -f barrons.xml ] && cmp -s barrons.xml new_feed.xml; then
-            echo "No change since last run."
-            rm new_feed.xml
-            exit 0
+            # A real feed is comfortably larger than this; a block/captcha page
+            # or an empty body is not. Skip rather than publish garbage.
+            if [ "$SIZE" -lt 5000 ]; then
+              echo "::error::[$name] response only $SIZE bytes — looks blocked or empty, leaving $out untouched"
+              rm -f "$tmp"
+              continue
+            fi
+
+            if ! python3 -c "import xml.etree.ElementTree as ET; ET.parse('$tmp')"; then
+              echo "::error::[$name] response is not well-formed XML — leaving $out untouched"
+              rm -f "$tmp"
+              continue
+            fi
+
+            ITEMS=$(python3 -c "import xml.etree.ElementTree as ET; print(len(ET.parse('$tmp').getroot().findall('.//item')))")
+            echo "[$name] parsed $ITEMS items"
+            if [ "$ITEMS" -lt 5 ]; then
+              echo "::error::[$name] only $ITEMS item(s) — suspiciously few, leaving $out untouched"
+              rm -f "$tmp"
+              continue
+            fi
+
+            if [ -f "$out" ] && cmp -s "$out" "$tmp"; then
+              echo "[$name] no change since last run."
+              rm -f "$tmp"
+              continue
+            fi
+
+            mv "$tmp" "$out"
+            git add "$out"
+            CHANGED=1
+          done
+
+          if [ "$CHANGED" = "1" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "Update feed(s) ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git push
+          else
+            echo "Nothing changed across any source."
           fi
-          mv new_feed.xml barrons.xml
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add barrons.xml
-          git commit -m "Update feed ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          git push
